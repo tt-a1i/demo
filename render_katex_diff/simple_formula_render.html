@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>公式渲染性能对比（优化版）</title>
+
+		<link
+			rel="stylesheet"
+			href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"
+		/>
+		<script src="https://cdn.jsdelivr.net/npm/markdown-it@13.0.1/dist/markdown-it.min.js"></script>
+		<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+		<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+		<style>
+			#result {
+				margin-top: 20px;
+				border: 1px solid #ddd;
+				padding: 10px;
+				border-radius: 5px;
+			}
+			.result-table {
+				width: 100%;
+				border-collapse: collapse;
+			}
+			.result-table td,
+			.result-table th {
+				border: 1px solid #ddd;
+				padding: 8px;
+				text-align: left;
+			}
+			.result-table tr:nth-child(even) {
+				background-color: #f2f2f2;
+			}
+			.progress-bar {
+				height: 20px;
+				background-color: #f3f3f3;
+				border-radius: 4px;
+				margin: 10px 0;
+
+				overflow: hidden;
+			}
+			.progress-bar-fill {
+				height: 100%;
+
+				background-color: #4caf50;
+				width: 0%;
+
+				transition: width 0.3s;
+			}
+		</style>
+	</head>
+	<body>
+		<h2>数学公式渲染性能对比测试 (1000 个公式)</h2>
+		<div>
+			<button id="test-button" onclick="runTests()">开始测试</button>
+			<div class="progress-bar" id="progress-container" style="display: none">
+				<div class="progress-bar-fill" id="progress-bar"></div>
+			</div>
+			<div id="result">点击"开始测试"按钮运行性能测试</div>
+		</div>
+
+		<script>
+			// 提前初始化markdown-it，避免测试时初始化开销
+			const md = window.markdownit();
+
+			// 添加数学公式解析规则
+			md.inline.ruler.after("escape", "math_inline", (state, silent) => {
+				const startPos = state.pos;
+				if (state.src.charAt(startPos) !== "$") return false;
+
+				// 跳过转义的美元符号
+
+				if (startPos > 0 && state.src.charAt(startPos - 1) === "\\")
+					return false;
+
+				// 查找结束位置
+
+				let endPos = state.src.indexOf("$", startPos + 1);
+
+				if (endPos === -1) return false;
+
+				// 确认结束符号不是被转义的
+				let escapeCount = 0;
+
+				let pos = endPos - 1;
+
+				while (pos >= 0 && state.src.charAt(pos) === "\\") {
+					escapeCount++;
+					pos--;
+				}
+				if (escapeCount % 2 !== 0) {
+					// 寻找下一个非转义的 $
+					endPos = state.src.indexOf("$", endPos + 1);
+					if (endPos === -1) return false;
+				}
+
+				if (!silent) {
+					const token = state.push("math_inline", "span", 0);
+
+					token.markup = "$";
+					token.content = state.src.slice(startPos + 1, endPos);
+					token.attrSet("class", "math-inline");
+				}
+
+				state.pos = endPos + 1;
+
+				return true;
+			});
+
+			md.block.ruler.before(
+				"fence",
+				"math_block",
+				(state, startLine, endLine, silent) => {
+					const startPos = state.bMarks[startLine] + state.tShift[startLine];
+					const maxPos = state.eMarks[startLine];
+
+					// 检查行开始是否有 $$
+					if (
+						maxPos - startPos < 2 ||
+						state.src.slice(startPos, startPos + 2) !== "$$"
+					) {
+						return false;
+					}
+
+					// 在静默模式下直接返回成功
+					if (silent) return true;
+
+					let nextLine = startLine;
+
+					let endFound = false;
+
+					// 寻找结束标记 $$
+					while (++nextLine < endLine) {
+						const lineStart = state.bMarks[nextLine] + state.tShift[nextLine];
+
+						const lineMax = state.eMarks[nextLine];
+
+						if (
+							lineMax - lineStart >= 2 &&
+							state.src.slice(lineStart, lineStart + 2) === "$$"
+						) {
+							endFound = true;
+							break;
+						}
+					}
+
+					if (!endFound) return false;
+
+					// 创建token
+
+					const token = state.push("math_block", "div", 0);
+
+					token.markup = "$$";
+					token.content = state.src
+						.slice(state.bMarks[startLine] + 2, state.bMarks[nextLine])
+						.trim();
+					token.attrSet("class", "math-block");
+					token.map = [startLine, nextLine + 1];
+
+					state.line = nextLine + 1;
+
+					return true;
+				}
+			);
+
+			// 添加渲染器
+
+			md.renderer.rules.math_inline = function (tokens, idx) {
+				return `<span class="math math-inline">${md.utils.escapeHtml(
+					tokens[idx].content
+				)}</span>`;
+			};
+
+			md.renderer.rules.math_block = function (tokens, idx) {
+				return `<div class="math math-block">${md.utils.escapeHtml(
+					tokens[idx].content
+				)}</div>`;
+			};
+
+			// 生成测试数据
+			const testContent = Array(1000)
+				.fill()
+				.map(
+					(_, i) =>
+						`行内公式 $E=mc^2_{${i}}$，块公式 $$\\int_{${i}}^{${
+							i + 1
+						}} f(x)dx$$`
+				)
+				.join("\n\n");
+
+			// 方式1: 直接渲染整个文本
+			function renderDirect() {
+				const start = performance.now();
+
+				const container = document.createElement("div");
+				container.innerHTML = testContent;
+
+				renderMathInElement(container, {
+					delimiters: [
+						{ left: "$$", right: "$$", display: true },
+
+						{ left: "$", right: "$", display: false },
+					],
+					throwOnError: false,
+				});
+
+				return performance.now() - start;
+			}
+
+			// 方式2: 预处理后渲染
+			function renderWithPreprocess() {
+				const start = performance.now();
+
+				// 生成预处理后的HTML
+				const html = md.render(testContent);
+
+				const container = document.createElement("div");
+				container.innerHTML = html;
+
+				// 仅渲染公式部分
+				const mathElements = container.querySelectorAll(".math");
+				mathElements.forEach((element) => {
+					const displayMode = element.classList.contains("math-block");
+					try {
+						window.katex.render(element.textContent, element, {
+							displayMode,
+							throwOnError: false,
+						});
+					} catch (e) {
+						console.error("KaTeX 渲染错误:", e);
+					}
+				});
+
+				return performance.now() - start;
+			}
+
+			// 测量内存使用
+			function getMemoryUsage() {
+				if (window.performance && window.performance.memory) {
+					return window.performance.memory.usedJSHeapSize / (1024 * 1024);
+				}
+				return null;
+			}
+
+			// 等待指定毫秒数
+
+			function wait(ms) {
+				return new Promise((resolve) => setTimeout(resolve, ms));
+			}
+
+			// 更新进度条
+			function updateProgress(percent) {
+				const progressBar = document.getElementById("progress-bar");
+				progressBar.style.width = `${percent}%`;
+			}
+
+			// 运行单次测试（直接渲染或预处理渲染）
+			async function runSingleTest(testFunction, isPrewarm = false) {
+				// 尝试清理内存
+				if (window.gc) {
+					try {
+						window.gc();
+					} catch (e) {}
+				}
+
+				// 记录初始内存使用
+				const memoryBefore = getMemoryUsage();
+
+				// 执行测试
+				const time = testFunction();
+
+				await wait(50); // 给系统一些时间稳定内存
+
+				// 记录测试后内存使用
+
+				const memoryAfter = getMemoryUsage();
+
+				// 内存差异
+				const memoryDiff =
+					memoryAfter !== null && memoryBefore !== null
+						? memoryAfter - memoryBefore
+						: null;
+
+				return { time, memoryDiff };
+			}
+
+			// 运行性能测试
+
+			async function runTests() {
+				// 准备UI
+				document.getElementById("test-button").disabled = true;
+
+				document.getElementById("result").innerHTML =
+					"<p>测试运行中，请稍候...</p>";
+
+				document.getElementById("progress-container").style.display = "block";
+				updateProgress(0);
+
+				// 等待KaTeX初始化
+				if (typeof renderMathInElement === "undefined") {
+					alert("KaTeX 未正确加载，请刷新页面");
+					document.getElementById("test-button").disabled = false;
+					document.getElementById("progress-container").style.display = "none";
+					return;
+				}
+
+				try {
+					// 预热阶段 (5次)
+					updateProgress(5);
+					await wait(100);
+					for (let i = 0; i < 5; i++) {
+						await runSingleTest(renderDirect, true);
+
+						await runSingleTest(renderWithPreprocess, true);
+
+						updateProgress(5 + i * 3);
+						await wait(10);
+					}
+
+					// 正式测试阶段
+					const directResults = [];
+					const preprocessResults = [];
+					const TEST_COUNT = 7; // 增加测试次数到7次，去掉最高最低值后取平均
+
+					// 交替运行两种测试方法，使测试更公平
+					for (let i = 0; i < TEST_COUNT; i++) {
+						updateProgress(20 + (i * 80) / TEST_COUNT / 2);
+						const directResult = await runSingleTest(renderDirect);
+
+						directResults.push(directResult);
+
+						await wait(150); // 测试间间隔增加到150ms
+
+						updateProgress(20 + (i * 80) / TEST_COUNT / 2 + 40 / TEST_COUNT);
+
+						const preprocessResult = await runSingleTest(renderWithPreprocess);
+
+						preprocessResults.push(preprocessResult);
+
+						await wait(150);
+					}
+
+					// 处理结果
+
+					displayResults(directResults, preprocessResults);
+				} catch (error) {
+					console.error("测试过程中出错:", error);
+
+					document.getElementById(
+						"result"
+					).innerHTML = `<p>测试出错: ${error.message}</p>`;
+				} finally {
+					document.getElementById("test-button").disabled = false;
+
+					document.getElementById("progress-container").style.display = "none";
+				}
+			}
+
+			// 显示测试结果
+			function displayResults(directResults, preprocessResults) {
+				// 按时间排序
+
+				const directTimes = directResults
+					.map((r) => r.time)
+					.sort((a, b) => a - b);
+				const preprocessTimes = preprocessResults
+					.map((r) => r.time)
+					.sort((a, b) => a - b);
+
+				// 移除最高和最低值
+				if (directTimes.length > 3) {
+					directTimes.pop(); // 移除最高值
+					directTimes.shift(); // 移除最低值
+					preprocessTimes.pop();
+					preprocessTimes.shift();
+				}
+
+				// 计算平均值
+				const avgDirect =
+					directTimes.reduce((a, b) => a + b, 0) / directTimes.length;
+				const avgPreprocess =
+					preprocessTimes.reduce((a, b) => a + b, 0) / preprocessTimes.length;
+
+				// 计算标准差
+				const stdDevDirect = Math.sqrt(
+					directTimes.reduce((a, b) => a + Math.pow(b - avgDirect, 2), 0) /
+						directTimes.length
+				);
+				const stdDevPreprocess = Math.sqrt(
+					preprocessTimes.reduce(
+						(a, b) => a + Math.pow(b - avgPreprocess, 2),
+						0
+					) / preprocessTimes.length
+				);
+
+				// 计算中位数
+				const medianDirect = getMedian(directTimes);
+
+				const medianPreprocess = getMedian(preprocessTimes);
+
+				// 计算内存使用情况
+				const directMemoryUsages = directResults
+					.map((r) => r.memoryDiff)
+					.filter((m) => m !== null);
+				const preprocessMemoryUsages = preprocessResults
+					.map((r) => r.memoryDiff)
+					.filter((m) => m !== null);
+
+				let avgDirectMemory = null;
+				let avgPreprocessMemory = null;
+
+				if (
+					directMemoryUsages.length > 0 &&
+					preprocessMemoryUsages.length > 0
+				) {
+					avgDirectMemory =
+						directMemoryUsages.reduce((a, b) => a + b, 0) /
+						directMemoryUsages.length;
+					avgPreprocessMemory =
+						preprocessMemoryUsages.reduce((a, b) => a + b, 0) /
+						preprocessMemoryUsages.length;
+				}
+
+				// 计算性能差异
+				const percentDiff = Math.abs(
+					((avgDirect - avgPreprocess) / avgDirect) * 100
+				);
+
+				const absoluteDiff = Math.abs(avgDirect - avgPreprocess);
+
+				const fasterMethod =
+					avgDirect > avgPreprocess ? "预处理渲染" : "直接渲染";
+
+				// 准备内存使用信息
+				let memoryInfo = "";
+
+				if (avgDirectMemory !== null && avgPreprocessMemory !== null) {
+					memoryInfo = `
+
+						<h4>内存使用情况:</h4>
+						<table class="result-table">
+
+							<tr><th>测试</th><th>平均额外内存使用 (MB)</th></tr>
+							<tr><td>直接渲染</td><td>${avgDirectMemory.toFixed(2)}</td></tr>
+							<tr><td>预处理渲染</td><td>${avgPreprocessMemory.toFixed(2)}</td></tr>
+
+						</table>
+					`;
+				} else {
+					memoryInfo = "<p><small>注: 此浏览器不支持内存使用测量</small></p>";
+				}
+
+				// 显示结果
+				const result = `
+					<h3>测试结果：</h3>
+					<table class="result-table">
+						<tr>
+							<th>测试方法</th>
+
+							<th>平均耗时 (ms)</th>
+
+							<th>中位数 (ms)</th>
+							<th>标准差</th>
+
+							<th>最小值 (ms)</th>
+							<th>最大值 (ms)</th>
+
+						</tr>
+						<tr>
+							<td>直接渲染</td>
+							<td>${avgDirect.toFixed(2)}</td>
+							<td>${medianDirect.toFixed(2)}</td>
+
+							<td>${stdDevDirect.toFixed(2)}</td>
+							<td>${Math.min(...directTimes).toFixed(2)}</td>
+							<td>${Math.max(...directTimes).toFixed(2)}</td>
+						</tr>
+						<tr>
+							<td>预处理渲染</td>
+							<td>${avgPreprocess.toFixed(2)}</td>
+							<td>${medianPreprocess.toFixed(2)}</td>
+							<td>${stdDevPreprocess.toFixed(2)}</td>
+							<td>${Math.min(...preprocessTimes).toFixed(2)}</td>
+							<td>${Math.max(...preprocessTimes).toFixed(2)}</td>
+						</tr>
+					</table>
+					
+					<h4>性能对比:</h4>
+					<p>${fasterMethod}比${
+					fasterMethod === "直接渲染" ? "预处理渲染" : "直接渲染"
+				}快 
+					<strong>${percentDiff.toFixed(2)}%</strong> (${absoluteDiff.toFixed(2)}ms)</p>
+					
+					${memoryInfo}
+					
+					<p><small>注：测试结果已剔除最高值和最低值，取平均。测试运行了${
+						directTimes.length + 2
+					}次。</small></p>
+				`;
+
+				document.getElementById("result").innerHTML = result;
+			}
+
+			// 获取中位数
+			function getMedian(values) {
+				if (values.length === 0) return 0;
+
+				const sorted = [...values].sort((a, b) => a - b);
+				const middle = Math.floor(sorted.length / 2);
+
+				if (sorted.length % 2 === 0) {
+					return (sorted[middle - 1] + sorted[middle]) / 2;
+				} else {
+					return sorted[middle];
+				}
+			}
+		</script>
+	</body>
+</html>
